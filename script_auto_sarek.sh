@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# set -x
-# set -e
+set -e
 
 # load variables
 source auto_sarek.conf  #TODO: modify path
@@ -27,12 +26,17 @@ make_runs_file () {
         done
 }
 
-# get bed file from samplesheet. If does not exist, modify status to 1
+change_status () {
+    # argument : new status
+    sed -i "s/${RUN_NAME} .*/${RUN_NAME} $1/" "${SEQ_PATH}${RUNS_FILE}"
+}
+
+# get bed file from samplesheet. If does not exist, modify status to 0 (ignore)
 get_bed_file () {
     local DESCRIPTION=$(grep "Description.*\.bed" "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}")
     if [ -z ${DESCRIPTION} ]
     then 
-        sed -i "s/${RUN_NAME} .*/${RUN_NAME} 1/" "${SEQ_PATH}${RUNS_FILE}"
+        change_status 0
         LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
     else
         local tmp=${DESCRIPTION#*,}
@@ -49,16 +53,13 @@ create_samplesheet () {
     while read SAMPLESHEET_LINE #TODO: check if works
         do
         local SAMPLE_NAME=${SAMPLESHEET_LINE%%,*}
-        local FASTQ1=$(ls ${SEQ_PATH}${RUN}/Alignement_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R1_.*")
+        local FASTQ1=$(ls ${SEQ_PATH}${RUN}/Alignement_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R1_.*") #TODO: check if path right for every sequencer
         local FASTQ2=$(ls ${SEQ_PATH}${RUN}/Alignement_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R2_.*")
         echo "${SAMPLE_NAME},${SAMPLE_NAME},1,${FASTQ1},${FASTQ2}" >>"${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}"
     done
 }
 
-launch_sarek () {
-    #TODO: find which reference genomes from the bed name or exhaustive list 
-    # should all be in the name except CF_panel_v2_3395481.bed (to check)
-    
+launch_sarek () { 
     # get genome version
     VGENOME=$(echo ${BEDFILE} | grep -oE 'hg[0-9]{2}')
     if [ ${VGENOME} = hg38 || ${BEDFILE} in ${BEDLIST38} ]
@@ -79,23 +80,20 @@ launch_sarek () {
     #TODO: necessary to get every parameter through a variable ?
     COMMAND="nextflow run ${SAREK_PATH} -profile singularity \
         -c ${CONFIG_PATH} \
-        -bg \
-        -w ${WORKDIR_PATH} \
+        -w ${SEQ_PATH}${RUN}/${WORKDIR} \
         --input "${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}" \
         --outdir "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}" \
         --step ${STEP} \
         --tools ${TOOLS} \
         --intervals ${BEDFILE} \
         --wes ${WES} \
-        --dict ${DICT} \
         --save_output_as_bam ${SAVE_OUTPUT_AS_BAM} \
         --concatenate_vcfs ${CONCATENATE_VCFS} \
         --trim_fastq ${TRIM_FASTQ} \
         --split_fastq ${SPLIT_FASTQ} \
         ${PARAMS}"
-    ${COMMAND} 2>"${SEQ_PATH}${RUNS_FILE}/${NF_ERROR_FILE}" > #TODO: output file
+    ${COMMAND} >"${SEQ_PATH}${RUNS_FILE}/${NF_STDOUT_FILE}"
 }
-
 
 
 ############################ MAIN
@@ -104,7 +102,7 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
     do
     RUN_LIST=$(ls ${SEQ_PATH} | egrep '^[0-9]{6}_')
 
-    # checks runs file
+    # check runs file
     if [ ! -f "${SEQ_PATH}${RUNS_FILE}" ]
     then
         make_runs_file ${SEQ_PATH} ${RUN_LIST}
@@ -113,24 +111,62 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
     for RUN in ${RUN_LIST}
         do
         LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
-        # adds the new run to runs file
+        # add the new run to runs file
         if [ -z "${LINE}" ]
         then
               echo "${RUN} 1" >>"${SEQ_PATH}${RUNS_FILE}"
         fi
         get_bed_file 
         STATUS=${LINE##* }
-        # checks if the run is ready (status 1 and trigger file exists)
-        if [ STATUS = 1 && -f ${SEQ_PATH}${RUNS_FILE}/${TRIGGER_FILE} ]
+        # check if the run is ready (status 1 and trigger file exists)
+        if [ ${STATUS} = 1 && -f ${SEQ_PATH}${RUNS_FILE}/${TRIGGER_FILE} ]
         then
             create_samplesheet
-            conda activate NF-core
-            launch_sarek
-            # check if run executed properly and change status to 2
-            # check for Pipeline completed successfully when 
-
+            conda activate NF-core && launch_sarek
+            # get error
+            FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" ) 
+            # change trace name
+            mv "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/_execution_trace_$(date +%F).txt"
+            # if error is from custom dump software versions, continue, else, throw error
+            if [ $(echo "${FAIL_LINES}" | wc -l) -eq 1 ] && [ -z "$(echo "${FAIL_LINES}" | grep DSV)" ]
+            then
+                # get temporary version file
+                VERSIONS_FILE_PATH="${SEQ_PATH}${RUN}/${WORKDIR}$(echo $FAIL_LINES | awk '{print $2}')*/collated_versions.yml"
+                TMP_VERSIONS_FILE_PATH="${SEQ_PATH}${RUN}/${WORKDIR}$(echo $FAIL_LINES | awk '{print $2}')*/tmp_collated_versions.yml"
+                cp ${VERSIONS_FILE_PATH} ${TMP_VERSIONS_FILE_PATH}
+                # modify the file to remove problematic java warnings
+                FLAG=0
+                while read VERSION_LINE
+                    do
+                    if [ ${FLAG} -eq 0 ]
+                        then
+                        if [ -z "$(echo "${VERSION_LINE}" | grep 'warning')" ]
+                        then 
+                            echo "${VERSION_LINE}" >>${TMP_VERSIONS_FILE_PATH}
+                        else
+                            TMP_VERSION_LINE="${VERSION_LINE%%:*}: "
+                            FLAG=1
+                        fi
+                    else
+                        TMP_VERSION_LINE+="${VERSION_LINE}"
+                        echo "${TMP_VERSION_LINE}" >>${TMP_VERSIONS_FILE_PATH}
+                        FLAG=0
+                    fi
+                done < ${VERSIONS_FILE_PATH}
+                mv ${TMP_VERSIONS_FILE_PATH} ${VERSIONS_FILE_PATH}
+                # launch sarek again with resume
+                eval ${COMMAND} -resume >"${SEQ_PATH}${RUNS_FILE}/${NF_STDOUT_FILE}"
+                FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
+                if [ -z "$(echo "${FAIL_LINES}")" ]
+                then
+                    # Pipeline completed ! change run status to done
+                    change_status 2
+                else
+                    #TODO: throw error with run info
+            else
+                #TODO: throw error with run info
             conda deactivate
+            #TODO: remove temporary files (deal with other logs, may need CWD)
         done
-
 done
 
