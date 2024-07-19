@@ -4,7 +4,13 @@ set -e
 
 # load variables
 source auto_sarek.conf  #TODO: modify path
-
+HEADER="[HEADER]
+A list of all the runs in this directory and their status regarding the sarek workflow
+    0: to ignore
+    1: to be treated
+    2: done
+    
+[FILES]"
 
 ############################ FUNCTIONS
 
@@ -12,17 +18,10 @@ source auto_sarek.conf  #TODO: modify path
 make_runs_file () {
     # argument 1 runs ouput directory
     # argument 2 run list
+    echo "${HEADER}" >"${$1}${RUNS_FILE}"
     for RUN in ${$2}
         do
-        #TODO: improve header, verify format
-        HEADER="[HEADER]
-        A list of all the runs in this directory and their status regarding the sarek workflow
-            0: to ignore
-            1: to be treated
-            2: done
-        [FILES]"
-        echo "${HEADER}" >>${RUNS_FILE}
-        echo "${RUN} 0" >>${$1}${RUNS_FILE}
+        echo "${RUN} 0" >>"${$1}${RUNS_FILE}"
         done
 }
 
@@ -53,8 +52,8 @@ create_samplesheet () {
     while read SAMPLESHEET_LINE #TODO: check if works
         do
         local SAMPLE_NAME=${SAMPLESHEET_LINE%%,*}
-        local FASTQ1=$(ls ${SEQ_PATH}${RUN}/Alignement_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R1_.*") #TODO: check if path right for every sequencer
-        local FASTQ2=$(ls ${SEQ_PATH}${RUN}/Alignement_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R2_.*")
+        local FASTQ1=$(ls ${SEQ_PATH}${RUN}/Alignment_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R1_.*") #TODO: check if path right for every sequencer
+        local FASTQ2=$(ls ${SEQ_PATH}${RUN}/Alignment_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R2_.*")
         echo "${SAMPLE_NAME},${SAMPLE_NAME},1,${FASTQ1},${FASTQ2}" >>"${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}"
     done
 }
@@ -92,7 +91,7 @@ launch_sarek () {
         --trim_fastq ${TRIM_FASTQ} \
         --split_fastq ${SPLIT_FASTQ} \
         ${PARAMS}"
-    ${COMMAND} >"${SEQ_PATH}${RUNS_FILE}/${NF_STDOUT_FILE}"
+    ${COMMAND} >"${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
 }
 
 
@@ -105,21 +104,24 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
     # check runs file
     if [ ! -f "${SEQ_PATH}${RUNS_FILE}" ]
     then
-        make_runs_file ${SEQ_PATH} ${RUN_LIST}
+        make_runs_file "${SEQ_PATH}" "${RUN_LIST}"
     fi
 
     for RUN in ${RUN_LIST}
         do
+        set +e
         LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
+        set -e
         # add the new run to runs file
         if [ -z "${LINE}" ]
         then
               echo "${RUN} 1" >>"${SEQ_PATH}${RUNS_FILE}"
+              LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
         fi
         get_bed_file 
         STATUS=${LINE##* }
         # check if the run is ready (status 1 and trigger file exists)
-        if [ ${STATUS} = 1 && -f ${SEQ_PATH}${RUNS_FILE}/${TRIGGER_FILE} ]
+        if [ ${STATUS} = 1 && -f ${SEQ_PATH}${RUN}/${TRIGGER_FILE} ]
         then
             create_samplesheet
             conda activate NF-core && launch_sarek
@@ -131,31 +133,36 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
             if [ $(echo "${FAIL_LINES}" | wc -l) -eq 1 ] && [ -z "$(echo "${FAIL_LINES}" | grep DSV)" ]
             then
                 # get temporary version file
-                VERSIONS_FILE_PATH="${SEQ_PATH}${RUN}/${WORKDIR}$(echo $FAIL_LINES | awk '{print $2}')*/collated_versions.yml"
-                TMP_VERSIONS_FILE_PATH="${SEQ_PATH}${RUN}/${WORKDIR}$(echo $FAIL_LINES | awk '{print $2}')*/tmp_collated_versions.yml"
-                cp ${VERSIONS_FILE_PATH} ${TMP_VERSIONS_FILE_PATH}
+                VERSIONS_FILE=$(realpath "${SEQ_PATH}${RUN}/${WORKDIR}/tmp/*/*/collated_versions.yml")
+                VERSIONS_FILE_TMP="tmp_collated_versions"
                 # modify the file to remove problematic java warnings
                 FLAG=0
                 while read VERSION_LINE
                     do
                     if [ ${FLAG} -eq 0 ]
-                        then
+                    then
                         if [ -z "$(echo "${VERSION_LINE}" | grep 'warning')" ]
-                        then 
-                            echo "${VERSION_LINE}" >>${TMP_VERSIONS_FILE_PATH}
+                        then
+                            if [ -z "$(echo "${VERSION_LINE}" | grep NFCORE_SAREK)" ]
+                            then
+                                echo "    ${VERSION_LINE}" >>${VERSIONS_FILE_TMP}
+                            else    
+                                echo "${VERSION_LINE}" >>${VERSIONS_FILE_TMP}
+                            fi
                         else
                             TMP_VERSION_LINE="${VERSION_LINE%%:*}: "
                             FLAG=1
                         fi
                     else
                         TMP_VERSION_LINE+="${VERSION_LINE}"
-                        echo "${TMP_VERSION_LINE}" >>${TMP_VERSIONS_FILE_PATH}
+                        echo "    ${TMP_VERSION_LINE}" >>${VERSIONS_FILE_TMP}
                         FLAG=0
                     fi
-                done < ${VERSIONS_FILE_PATH}
-                mv ${TMP_VERSIONS_FILE_PATH} ${VERSIONS_FILE_PATH}
+                done < ${VERSIONS_FILE}
+                # overwrite version file
+                mv ${VERSIONS_FILE_TMP} ${VERSIONS_FILE}
                 # launch sarek again with resume
-                eval ${COMMAND} -resume >"${SEQ_PATH}${RUNS_FILE}/${NF_STDOUT_FILE}"
+                eval "${COMMAND} -resume" >"${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
                 FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
                 if [ -z "$(echo "${FAIL_LINES}")" ]
                 then
