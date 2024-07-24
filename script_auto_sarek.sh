@@ -18,10 +18,10 @@ A list of all the runs in this directory and their status regarding the sarek wo
 make_runs_file () {
     # argument 1 runs ouput directory
     # argument 2 run list
-    echo "${HEADER}" >"${$1}${RUNS_FILE}"
-    for RUN in ${$2}
+    echo "${HEADER}" >"$1${RUNS_FILE}"
+    for RUN in $2
         do
-        echo "${RUN} 0" >>"${$1}${RUNS_FILE}"
+        echo "${RUN} 0" >>"$1${RUNS_FILE}"
         done
 }
 
@@ -32,36 +32,47 @@ change_status () {
 
 # get bed file from samplesheet. If does not exist, modify status to 0 (ignore)
 get_bed_file () {
-    local DESCRIPTION=$(grep "Description.*\.bed" "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}")
-    if [ -z ${DESCRIPTION} ]
+    if [ -f "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}" ]
     then 
-        change_status 0
-        LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
+        local DESCRIPTION=$(grep "Description.*\.bed" "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}")
+        if [ -z "${DESCRIPTION}" ]
+        then 
+            change_status 0
+            LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
+        else
+            local tmp=${DESCRIPTION#*,}
+            BEDFILE=${tmp%#*}
+            #TODO: check if bed exists in valid beds list
+        fi
     else
-        local tmp=${DESCRIPTION#*,}
-        BEDFILE=${tmp%#*}
-        #TODO: check if bed exists in valid beds list
+        change_status 0
     fi
 }
 
 create_samplesheet () {
     # header
     echo "patient,sample,lane,fastq_1,fastq_2" >"${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}"
+    # fastq path in the run directory
+    case "${SEQ_PATH}" in
+        "${MINISEQ}") local FASTQ_PATH="Alignment_*/${RUN}*/Fastq/" ;;
+        "${MISEQ}") local FASTQ_PATH="Data/Intensities/BaseCalls/" ;;
+        "${NEXTSEQ}") local FASTQ_PATH="FastQs/" ;;
+    esac
     # loop on Samplesheet.csv on Data after header
     sed -n "/\[Data\]/ {n; :a; n; p; ba}" "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}" | \
-    while read SAMPLESHEET_LINE #TODO: check if works
+    while read -r SAMPLESHEET_LINE
         do
         local SAMPLE_NAME=${SAMPLESHEET_LINE%%,*}
-        local FASTQ1=$(ls ${SEQ_PATH}${RUN}/Alignment_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R1_.*") #TODO: check if path right for every sequencer
-        local FASTQ2=$(ls ${SEQ_PATH}${RUN}/Alignment_*/${RUN}*/Fastq/ | grep "^${SAMPLE_NAME}_.*_R2_.*")
+        local FASTQ1=$(ls ${SEQ_PATH}/${RUN}/${FASTQ_PATH} | grep "^${SAMPLE_NAME}_.*_R1_.*")
+        local FASTQ2=$(ls ${SEQ_PATH}/${RUN}/${FASTQ_PATH}/ | grep "^${SAMPLE_NAME}_.*_R2_.*")
         echo "${SAMPLE_NAME},${SAMPLE_NAME},1,${FASTQ1},${FASTQ2}" >>"${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}"
     done
 }
 
 launch_sarek () { 
     # get genome version
-    VGENOME=$(echo ${BEDFILE} | grep -oE 'hg[0-9]{2}')
-    if [ ${VGENOME} = hg38 || ${BEDFILE} in ${BEDLIST38} ]
+    VGENOME=$(echo "${BEDFILE}" | grep -oE 'hg[0-9]{2}')
+    if [ "${VGENOME}" = "hg38" ] || [[ "${BEDLIST38}" =~ ${BEDFILE} ]]
     then 
         # string with genome-specific parameters
         PARAMS="--genome ${GENOME_38} \
@@ -69,17 +80,19 @@ launch_sarek () {
                 --fasta ${FASTA_38} \
                 --fasta_fai ${FASTA_FAI_38}"
     fi
-    if [ ${VGENOME} = hg19 || ${BEDFILE} in ${BEDLIST19} ]
+    if [ "${VGENOME}" = "hg19" ] || [[ "${BEDLIST19}" =~ ${BEDFILE} ]]
     then 
         # string with genome-specific parameters
-        PARAMS=""
+        PARAMS="--genome ${GENOME_19} \
+                --igenomes_base ${IGENOMES_BASE_19} \
+                --fasta ${FASTA_19} \
+                --fasta_fai ${FASTA_FAI_19}"
     fi
     #TODO: if want to add an else to notify unknown bed, do cases ? or second in first's else
     
-    #TODO: necessary to get every parameter through a variable ?
     COMMAND="nextflow run ${SAREK_PATH} -profile singularity \
         -c ${CONFIG_PATH} \
-        -w ${SEQ_PATH}${RUN}/${WORKDIR} \
+        -w "${SEQ_PATH}${RUN}/${WORKDIR}" \
         --input "${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}" \
         --outdir "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}" \
         --step ${STEP} \
@@ -91,7 +104,7 @@ launch_sarek () {
         --trim_fastq ${TRIM_FASTQ} \
         --split_fastq ${SPLIT_FASTQ} \
         ${PARAMS}"
-    ${COMMAND} >"${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
+    ${COMMAND} &> "${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
 }
 
 
@@ -99,7 +112,7 @@ launch_sarek () {
 
 for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
     do
-    RUN_LIST=$(ls ${SEQ_PATH} | egrep '^[0-9]{6}_')
+    RUN_LIST=$(ls "${SEQ_PATH}" | grep -E '^[0-9]{6}_')
 
     # check runs file
     if [ ! -f "${SEQ_PATH}${RUNS_FILE}" ]
@@ -118,26 +131,26 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
               echo "${RUN} 1" >>"${SEQ_PATH}${RUNS_FILE}"
               LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
         fi
-        get_bed_file 
+        get_bed_file
         STATUS=${LINE##* }
         # check if the run is ready (status 1 and trigger file exists)
-        if [ ${STATUS} = 1 && -f ${SEQ_PATH}${RUN}/${TRIGGER_FILE} ]
+        if [[ ${STATUS} = 1 && -f ${SEQ_PATH}${RUN}/${TRIGGER_FILE} ]]
         then
             create_samplesheet
             conda activate NF-core && launch_sarek
             # get error
-            FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" ) 
+            FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
             # change trace name
             mv "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/_execution_trace_$(date +%F).txt"
             # if error is from custom dump software versions, continue, else, throw error
-            if [ $(echo "${FAIL_LINES}" | wc -l) -eq 1 ] && [ -z "$(echo "${FAIL_LINES}" | grep DSV)" ]
+            if [[ $(echo "${FAIL_LINES}" | wc -l) -eq 1 ]] && [ -n "$(echo "${FAIL_LINES}" | grep DSV)" ]
             then
                 # get temporary version file
                 VERSIONS_FILE=$(realpath "${SEQ_PATH}${RUN}/${WORKDIR}/tmp/*/*/collated_versions.yml")
-                VERSIONS_FILE_TMP="tmp_collated_versions"
+                VERSIONS_FILE_TMP=tmp_collated_versions
                 # modify the file to remove problematic java warnings
                 FLAG=0
-                while read VERSION_LINE
+                while read -r VERSION_LINE
                     do
                     if [ ${FLAG} -eq 0 ]
                     then
@@ -158,22 +171,25 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
                         echo "    ${TMP_VERSION_LINE}" >>${VERSIONS_FILE_TMP}
                         FLAG=0
                     fi
-                done < ${VERSIONS_FILE}
+                done < "${VERSIONS_FILE}"
                 # overwrite version file
-                mv ${VERSIONS_FILE_TMP} ${VERSIONS_FILE}
+                mv ${VERSIONS_FILE_TMP} "${VERSIONS_FILE}"
                 # launch sarek again with resume
-                eval "${COMMAND} -resume" >"${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
+                eval "${COMMAND} -resume &> ${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
                 FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
-                if [ -z "$(echo "${FAIL_LINES}")" ]
+                if [ -z "${FAIL_LINES}" ]
                 then
                     # Pipeline completed ! change run status to done
                     change_status 2
-                else
+                #else
                     #TODO: throw error with run info
-            else
+                fi
+            #else
                 #TODO: throw error with run info
+            fi
             conda deactivate
             #TODO: remove temporary files (deal with other logs, may need CWD)
-        done
+        fi
+    done
 done
 
