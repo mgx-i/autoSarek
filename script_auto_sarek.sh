@@ -42,7 +42,6 @@ get_bed_file () {
         else
             local tmp=${DESCRIPTION#*,}
             BEDFILE=${tmp%#*}
-            #TODO: check if bed exists in valid beds list
         fi
     else
         change_status 0
@@ -72,24 +71,20 @@ create_samplesheet () {
 launch_sarek () { 
     # get genome version
     VGENOME=$(echo "${BEDFILE}" | grep -oE 'hg[0-9]{2}')
-    if [ "${VGENOME}" = "hg38" ] || [[ "${BEDLIST38}" =~ ${BEDFILE} ]]
+    if [ "${VGENOME}" = "hg38" ]
     then 
         # string with genome-specific parameters
         PARAMS="--genome ${GENOME_38} \
                 --igenomes_base ${IGENOMES_BASE_38} \
                 --fasta ${FASTA_38} \
                 --fasta_fai ${FASTA_FAI_38}"
-    fi
-    if [ "${VGENOME}" = "hg19" ] || [[ "${BEDLIST19}" =~ ${BEDFILE} ]]
-    then 
+    else
         # string with genome-specific parameters
         PARAMS="--genome ${GENOME_19} \
                 --igenomes_base ${IGENOMES_BASE_19} \
                 --fasta ${FASTA_19} \
                 --fasta_fai ${FASTA_FAI_19}"
     fi
-    #TODO: if want to add an else to notify unknown bed, do cases ? or second in first's else
-    
     COMMAND="nextflow run ${SAREK_PATH} -profile singularity \
         -c ${CONFIG_PATH} \
         -w "${SEQ_PATH}${RUN}/${WORKDIR}" \
