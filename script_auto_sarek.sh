@@ -4,12 +4,15 @@ set -e
 
 # load variables
 source auto_sarek.conf  #TODO: modify path
+source $(conda info --base)/etc/profile.d/conda.sh
+
 HEADER="[HEADER]
 A list of all the runs in this directory and their status regarding the sarek workflow
     0: to ignore
     1: to be treated
     2: done
-    
+    3: unexpected error
+
 [FILES]"
 
 ############################ FUNCTIONS
@@ -53,9 +56,9 @@ create_samplesheet () {
     echo "patient,sample,lane,fastq_1,fastq_2" >"${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}"
     # fastq path in the run directory
     case "${SEQ_PATH}" in
-        "${MINISEQ}") local FASTQ_PATH="Alignment_*/${RUN}*/Fastq/" ;;
-        "${MISEQ}") local FASTQ_PATH="Data/Intensities/BaseCalls/" ;;
-        "${NEXTSEQ}") local FASTQ_PATH="FastQs/" ;;
+        "${MINISEQ_PATH}") local FASTQ_PATH="Alignment_*/${RUN}*/Fastq/" ;;
+        "${MISEQ_PATH}") local FASTQ_PATH="Data/Intensities/BaseCalls/" ;;
+        "${NEXTSEQ_PATH}") local FASTQ_PATH="FastQs/" ;;
     esac
     # loop on Samplesheet.csv on Data after header
     sed -n "/\[Data\]/ {n; :a; n; p; ba}" "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}" | \
@@ -105,6 +108,7 @@ launch_sarek () {
 
 ############################ MAIN
 
+conda activate NF-core
 for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
     do
     RUN_LIST=$(ls "${SEQ_PATH}" | grep -E '^[0-9]{6}_')
@@ -132,7 +136,7 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
         if [[ ${STATUS} = 1 && -f ${SEQ_PATH}${RUN}/${TRIGGER_FILE} ]]
         then
             create_samplesheet
-            conda activate NF-core && launch_sarek
+            launch_sarek
             # get error
             FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
             # change trace name
@@ -176,15 +180,17 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
                 then
                     # Pipeline completed ! change run status to done
                     change_status 2
-                #else
-                    #TODO: throw error with run info
+                else
+                    #TODO: throw error with run info?
+                    change_status 3
                 fi
-            #else
-                #TODO: throw error with run info
+            else
+                #TODO: throw error with run info?
+                change_status 3
             fi
-            conda deactivate
             #TODO: remove temporary files (deal with other logs, may need CWD)
+            # rm -r "${SEQ_PATH:?}${RUN:?}/${WORKDIR}"
         fi
     done
 done
-
+conda deactivate
