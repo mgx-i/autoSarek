@@ -1,11 +1,15 @@
 #!/bin/bash
 
-#TODO: ajouter log
-#TODO: write readme
+
+### autoSarek
+### author : Margaux Imbert
+### date : 01/08/2024
+### automatically checks for new runs and launches sarek if necessary
+
+
 
 # load variables
-source auto_sarek.conf  #TODO: modify path
-source $(conda info --base)/etc/profile.d/conda.sh
+source auto_sarek_debug.conf
 
 CWD="$(pwd)/"
 HEADER="[HEADER]
@@ -17,13 +21,16 @@ A list of all the runs in this directory and their status regarding the sarek wo
 
 [FILES]"
 
+source $(conda info --base)/etc/profile.d/conda.sh
+
+
 ############################ FUNCTIONS
 
 # create sarek_runs.txt file containing run names and status
 make_runs_file () {
     # argument 1 runs ouput directory
     # argument 2 run list
-    echo "${HEADER}" >"$1${RUNS_FILE}" #TODO: issues ?
+    echo "${HEADER}" >"$1${RUNS_FILE}"
     for RUN in $2
         do
         echo "${RUN} 0" >>"$1${RUNS_FILE}"
@@ -32,10 +39,10 @@ make_runs_file () {
 
 change_status () {
     # argument : new status
-    sed -i "s/${RUN_NAME} .*/${RUN_NAME} $1/" "${SEQ_PATH}${RUNS_FILE}"
+    sed -i "s/^${RUN_NAME} .*/${RUN_NAME} $1/" "${SEQ_PATH}${RUNS_FILE}"
 }
 
-# get bed file from samplesheet. If does not exist, modify status to 0 (ignore)
+# get bed file from samplesheet or change status to 0 (ignore)
 get_bed_file () {
     if [ -f "${SEQ_PATH}${RUN}/${SAMPLESHEET_SEQ}" ]
     then 
@@ -68,8 +75,8 @@ create_samplesheet () {
     while read -r SAMPLESHEET_LINE
         do
         local SAMPLE_NAME=${SAMPLESHEET_LINE%%,*}
-        local FASTQ1=$(realpath ${SEQ_PATH}/${RUN}/${FASTQ_PATH}/* | grep "^${SAMPLE_NAME}_.*_R1_.*")
-        local FASTQ2=$(realpath ${SEQ_PATH}/${RUN}/${FASTQ_PATH}/* | grep "^${SAMPLE_NAME}_.*_R2_.*")
+        local FASTQ1=$(realpath ${SEQ_PATH}/${RUN}/${FASTQ_PATH}/* | grep "${SAMPLE_NAME}_.*_R1_.*")
+        local FASTQ2=$(realpath ${SEQ_PATH}/${RUN}/${FASTQ_PATH}/* | grep "${SAMPLE_NAME}_.*_R2_.*")
         echo "${SAMPLE_NAME},${SAMPLE_NAME},1,${FASTQ1},${FASTQ2}" >>"${SEQ_PATH}${RUN}/${SAMPLESHEET_SAREK}"
     done
 }
@@ -86,7 +93,8 @@ launch_sarek () {
         --fasta ${FASTA_38} \
         --fasta_fai ${FASTA_FAI_38}"
     else
-        BEDFILE="${BEDNAME}_nochr.bed" #TODO: rename sarek beds
+        # add no_chr suffix to match genome format
+        BEDFILE="${BEDNAME}_nochr.bed"
         # string with genome-specific parameters
         PARAMS="--genome ${GENOME_19} \
         --igenomes_base ${IGENOMES_BASE_19} \
@@ -100,14 +108,14 @@ launch_sarek () {
     --outdir "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}" \
     --step ${STEP} \
     --tools ${TOOLS} \
-    --intervals ${BEDFILE} \
+    --intervals "${BED_PATH}/${BEDFILE}" \
     --wes ${WES} \
     --save_output_as_bam ${SAVE_OUTPUT_AS_BAM} \
     --concatenate_vcfs ${CONCATENATE_VCFS} \
     --trim_fastq ${TRIM_FASTQ} \
     --split_fastq ${SPLIT_FASTQ} \
     ${PARAMS}"
-    ${COMMAND} &> "${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
+    ${COMMAND} &> "${SEQ_PATH}/${RUN}/${NF_STDOUT_FILE}"
 }
 
 
@@ -127,11 +135,14 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
     for RUN in ${RUN_LIST}
         do
         LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
+        FLAG_RUNS_FILE=1
         # add the new run to runs file
         if [ -z "${LINE}" ]
         then
               echo "${RUN} 1" >>"${SEQ_PATH}${RUNS_FILE}"
               LINE=$(grep "${RUN}" "${SEQ_PATH}${RUNS_FILE}")
+              # notify runs file has just been created to avoid overflowing log
+              FLAG_RUNS_FILE=0
         fi
         get_bed_file
         STATUS=${LINE##* }
@@ -142,7 +153,7 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
             launch_sarek
             # get error
             FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
-            # if error is from custom dump software versions, continue, else, throw error
+            # if error is from custom dump software versions, modify problematic file and run again
             if [[ $(echo "${FAIL_LINES}" | wc -l) -eq 1 ]] && [ -n "$(echo "${FAIL_LINES}" | grep DSV)" ]
             then
                 # change trace name
@@ -179,18 +190,25 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
                 # launch sarek again with resume
                 eval "${COMMAND} -resume &> ${SEQ_PATH}${RUN}/${NF_STDOUT_FILE}"
                 FAIL_LINES=$(grep FAILED "${SEQ_PATH}${RUN}/${OUTDIR_SAREK}pipeline_info/execution_trace_*.txt" )
-                if [ -z "${FAIL_LINES}" ]
-                then
-                    # Pipeline completed ! change run status to done
-                    change_status 2
-                    rm -r "${SEQ_PATH:?}${RUN:?}/${WORKDIR:?}"
-                else
-                    change_status 3
-                fi
+            fi
+            if [ -z "${FAIL_LINES}" ]
+            then
+                # Pipeline completed ! change run status to done
+                change_status 2
+                RUN_DIR="${RUN:?}/"
+                rm -r "${SEQ_PATH:?}${RUN_DIR:?}${WORKDIR:?}"
+                echo "$(date +"%Y-%m-%d %H:%M") - Run ${SEQ_PATH}${RUN}  : sarek completed successfully"
             else
                 change_status 3
+                echo "$(date +"%Y-%m-%d %H:%M") - Run ${SEQ_PATH}${RUN} : sarek execution failed"
             fi
-            #TODO: remove logs
+            # remove logs
+            rm -r "${CWD:?}.nextflow"*
+        else
+            if [ "${FLAG_RUNS_FILE}" -eq 1 ]
+            then
+                echo "$(date +"%Y-%m-%d %H:%M") - Run ${SEQ_PATH}${RUN} : ignored"
+            fi
         fi
     done
 done
