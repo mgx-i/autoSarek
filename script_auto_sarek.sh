@@ -11,7 +11,6 @@
 # load variables
 source auto_sarek_debug.conf
 
-CWD="$(pwd)/"
 HEADER="[HEADER]
 A list of all the runs in this directory and their status regarding the sarek workflow
     0: to ignore
@@ -203,7 +202,7 @@ for SEQ_PATH in ${MINISEQ_PATH} ${MISEQ_PATH} ${NEXTSEQ_PATH}
                 echo "$(date +"%Y-%m-%d %H:%M") - Run ${SEQ_PATH}${RUN} : sarek execution failed"
             fi
             # remove logs
-            rm -r "${CWD:?}.nextflow"*
+            rm -r ".nextflow"*
         else
             if [ "${FLAG_RUNS_FILE}" -eq 1 ]
             then
